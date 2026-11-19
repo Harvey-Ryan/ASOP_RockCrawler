@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+Releases/
+*.spec
+# per-user state when running from source
+config.json
+signatures_cache.json
+extra_signatures.csv
+error.log
+selftest.txt
