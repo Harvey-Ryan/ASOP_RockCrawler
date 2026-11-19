@@ -1,7 +1,10 @@
-# Builds RockCrawler on Windows and, for a version tag (v1.2.3), publishes a GitHub Release
-# with RockCrawler-Setup.exe plus the update packages installed copies download.
+# Builds RockCrawler on Windows and publishes a GitHub Release with RockCrawler-Setup.exe
+# plus the update packages installed copies download.
 #
-# Release:  git tag v1.0.0 && git push origin v1.0.0
+# Release, either way:
+#   - Actions tab → "Build and release" → Run workflow → type a version (1.0.1) → Run.
+#     GitHub tags main as v1.0.1 and publishes it.
+#   - or push a tag: git tag v1.0.1 && git push origin v1.0.1
 # Every other push / PR: build + tests + self-test only (the build is attached to the run).
 name: Build and release
 
@@ -11,6 +14,11 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, like 1.0.1 (no "v"). Tags main and publishes it.'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -34,10 +42,23 @@ jobs:
       - name: Version
         id: v
         shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.0-ci.${GITHUB_RUN_NUMBER}"; fi
+          PUBLISH=false
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF_NAME#v}"; PUBLISH=true
+          elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            V="${INPUT_VERSION#v}"; V="${V// /}"; PUBLISH=true
+            if [[ "$GITHUB_REF" != refs/heads/main ]]; then echo "::error::Run releases from the main branch."; exit 1; fi
+            if ! [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "::error::Version must look like 1.0.1 (got '$INPUT_VERSION')."; exit 1; fi
+            if git ls-remote --exit-code --tags origin "refs/tags/v$V" >/dev/null; then echo "::error::v$V already exists. Pick a higher version."; exit 1; fi
+          else
+            V="0.0.0-ci.${GITHUB_RUN_NUMBER}"
+          fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "Building $V"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          echo "Building $V (publish: $PUBLISH)"
 
       - name: Install
         run: python -m pip install -r requirements.txt -r requirements-build.txt
@@ -50,19 +71,19 @@ jobs:
         run: ./scripts/build.ps1 -Version ${{ steps.v.outputs.version }}
 
       - name: Keep the build
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: steps.v.outputs.publish != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: RockCrawler-${{ steps.v.outputs.version }}
           path: dist/RockCrawler
 
       - uses: actions/setup-dotnet@v4
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.v.outputs.publish == 'true'
         with:
           dotnet-version: '8.0.x'
 
       - name: Package and publish the release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.v.outputs.publish == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -79,6 +100,14 @@ jobs:
           vpk pack --packId $env:APP_ID --packVersion $v --packDir dist\RockCrawler `
             --mainExe RockCrawler.exe --packTitle "ASOP RockCrawler" --packAuthors "ASOP" --icon assets\asop.ico
           if ($LASTEXITCODE) { throw "vpk pack failed" }
+
+          # Run-workflow releases: tag main now that the build and package are good
+          # (a tag pushed with the workflow's own token doesn't start another run).
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            git tag "v$v"
+            git push origin "v$v"
+            if ($LASTEXITCODE) { throw "couldn't push tag v$v" }
+          }
 
           vpk upload github --repoUrl $repo --publish --releaseName "ASOP RockCrawler $v" --tag "v$v" --token $env:GH_TOKEN
           if ($LASTEXITCODE) { throw "vpk upload failed" }
