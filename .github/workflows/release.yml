@@ -1,11 +1,13 @@
 # Builds RockCrawler on Windows and publishes a GitHub Release with RockCrawler-Setup.exe
 # plus the update packages installed copies download.
 #
-# Release, either way:
-#   - Actions tab → "Build and release" → Run workflow → type a version (1.0.1) → Run.
-#     GitHub tags main as v1.0.1 and publishes it.
-#   - or push a tag: git tag v1.0.1 && git push origin v1.0.1
-# Every other push / PR: build + tests + self-test only (the build is attached to the run).
+# Releasing is automatic: bump the version in the VERSION file (e.g. 1.0.3) in a pull
+# request. When it merges to main and that version hasn't been released yet, this tags
+# main as v1.0.3 and publishes it. Merges that leave VERSION alone just build and test.
+#
+# Also possible: Actions tab → "Build and release" → Run workflow → type a version, or
+# push a tag (git tag v1.0.3 && git push origin v1.0.3).
+# Pull requests: build + tests + self-test only (the build is attached to the run).
 name: Build and release
 
 on:
@@ -22,6 +24,11 @@ on:
 
 permissions:
   contents: write
+
+# One release at a time per branch/tag; a newer push waits rather than racing it.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   VPK_VERSION: 1.2.161 # keep in step with velopack in requirements.txt
@@ -46,8 +53,18 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           PUBLISH=false
+          FILE_V="$(tr -d ' \r\n' < VERSION)"
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             V="${GITHUB_REF_NAME#v}"; PUBLISH=true
+          elif [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main ]]; then
+            # Merged to main: release VERSION if it hasn't been released yet.
+            if ! [[ "$FILE_V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "::error::VERSION must look like 1.0.3 (got '$FILE_V')."; exit 1; fi
+            if git ls-remote --exit-code --tags origin "refs/tags/v$FILE_V" >/dev/null; then
+              V="0.0.0-ci.${GITHUB_RUN_NUMBER}"
+              echo "v$FILE_V is already released; bump VERSION to release this."
+            else
+              V="$FILE_V"; PUBLISH=true
+            fi
           elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             V="${INPUT_VERSION#v}"; V="${V// /}"; PUBLISH=true
             if [[ "$GITHUB_REF" != refs/heads/main ]]; then echo "::error::Run releases from the main branch."; exit 1; fi
@@ -55,6 +72,12 @@ jobs:
             if git ls-remote --exit-code --tags origin "refs/tags/v$V" >/dev/null; then echo "::error::v$V already exists. Pick a higher version."; exit 1; fi
           else
             V="0.0.0-ci.${GITHUB_RUN_NUMBER}"
+            # Pull requests: say whether merging will publish a release.
+            if git ls-remote --exit-code --tags origin "refs/tags/v$FILE_V" >/dev/null; then
+              echo "::notice::Merging won't release: v$FILE_V already exists. Bump VERSION to release."
+            else
+              echo "::notice::Merging this will release v$FILE_V."
+            fi
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
@@ -102,9 +125,9 @@ jobs:
             --shortcuts StartMenuRoot
           if ($LASTEXITCODE) { throw "vpk pack failed" }
 
-          # Run-workflow releases: tag main now that the build and package are good
-          # (a tag pushed with the workflow's own token doesn't start another run).
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+          # Releases started from main (merge or Run workflow): tag main now that the build and
+          # package are good (a tag pushed with the workflow's own token doesn't start another run).
+          if ("${{ github.ref_type }}" -ne "tag") {
             git tag "v$v"
             git push origin "v$v"
             if ($LASTEXITCODE) { throw "couldn't push tag v$v" }
