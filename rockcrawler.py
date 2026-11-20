@@ -71,7 +71,7 @@ DEFAULTS: dict = {
     "fade_ms": 450,
     "min_value": 100,
     "max_value": 500000,
-    "upscale": 3,
+    "ocr_digit_px": 40,  # auto-focus scales the number to this character height for OCR
     "invert": False,
     "threshold": 0,  # 0 = auto; otherwise 1-254 on the contrast-stretched image
     "remove_lines": True,
@@ -551,7 +551,9 @@ class App:
         self.stab = core.Stabilizer()
         self.fading, self.fade_job = False, None
         self.last_hash = None
-        self.last_parsed: tuple = (None, "")
+        self.last_parsed: tuple = (None, "", None)
+        self.variant_wins: list[int] = []  # how often each cleanup gave a known signature
+        self.focus: tuple | None = None  # where in the READ box the number was last found
         self.hud_rgb: tuple[int, int, int] | None = None
         self.debug = {"raw": "", "value": None, "img": None, "match": ""}
 
@@ -802,29 +804,40 @@ class App:
         shot = self.sct.grab({"left": x, "top": y, "width": max(1, w), "height": max(1, h)})
         raw = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
         now = time.monotonic()
-        # Several cleaned-up variants of the crop; each gets an OCR pass and the reading
-        # that is a real signature wins (see core.pick_value).
-        variants = [core.preprocess(raw, upscale=int(self.cfg["upscale"]), invert=bool(self.cfg["invert"]),
-                                    threshold=int(self.cfg["threshold"]), remove_lines=bool(self.cfg["remove_lines"]),
-                                    channel=ch, level=float(lv)) for ch, lv in self.cfg["variants"]]
-        variants = [v for v in variants if v is not None]
-        clean = variants[0] if variants else None
-        if not variants:
+        # Auto-focus: find the line of text that's the number (nearest where it was last
+        # time), crop to it and scale it to a steady character height. Then OCR it with the
+        # cleanup that has worked best on this HUD so far; the others only run if that pass
+        # isn't a known signature (see core.read_number).
+        variants = self.cfg["variants"]
+        if len(self.variant_wins) != len(variants):
+            self.variant_wins = [0] * len(variants)
+        order = sorted(range(len(variants)), key=lambda i: -self.variant_wins[i])
+        opts = dict(invert=bool(self.cfg["invert"]), threshold=int(self.cfg["threshold"]),
+                    remove_lines=bool(self.cfg["remove_lines"]))
+        ch, lv = variants[order[0]]
+        rows = core.find_text(raw, channel=ch, level=float(lv), prefer=self.focus, max_rows=2,
+                              target=int(self.cfg["ocr_digit_px"]), **opts)
+        clean = rows[0]["image"] if rows else None
+        if not rows:
             value, text = None, ""
             self.last_hash = None
         else:
-            h = hashlib.md5(b"".join(v.tobytes() for v in variants)).digest()
+            h = hashlib.md5(b"".join(r["image"].tobytes() for r in rows)).digest()
             if h == self.last_hash:
                 # Same pixels as last time: reuse the last result instead of re-running OCR.
                 # It still counts as a read, so a number that sits still stays on screen.
-                value, text = self.last_parsed
+                value, text, clean = self.last_parsed
             else:
                 self.last_hash = h
-                texts = [self.ocr.read(v) for v in variants]
-                text = "  |  ".join(t.strip() for t in texts)
-                value = core.pick_value(texts, self.is_known if self.signatures else None,
-                                        int(self.cfg["min_value"]), int(self.cfg["max_value"]))
-                self.last_parsed = (value, text)
+                res = core.read_number(raw, rows, self.ocr.read, self.is_known if self.signatures else None,
+                                       variants, order, opts, int(self.cfg["min_value"]), int(self.cfg["max_value"]),
+                                       target=int(self.cfg["ocr_digit_px"]))
+                value, text, clean = res["value"], res["text"], res["image"] or clean
+                if res["winner"] is not None:  # learn: this cleanup and this spot work on this HUD
+                    self.variant_wins[res["winner"]] += 1
+                    self.focus = res["center"]
+                self.debug["passes"] = res["passes"]
+                self.last_parsed = (value, text, clean)
         self.debug["crop"] = raw
 
         self.debug.update(raw=text.strip(), value=value, img=clean)
@@ -944,6 +957,7 @@ class App:
             return
         self.capture_boxes()
         self.editing = False
+        self.focus = None  # the READ box may have moved: find the number afresh
         self.save_config()
         for b in (self.read_box, self.disp_box):
             b.apply_style()
@@ -1388,7 +1402,8 @@ class SettingsPanel(ttk.Frame):
             "OCR text": d["raw"] or "—",
             "Value": f"{d['value']:,}" if d.get("value") is not None else "—",
             "Shows": a.text or "—",
-            "Engine": a.ocr.name if a.ocr else (a.ocr_error or "—"),
+            "Engine": (f"{a.ocr.name} · {d['passes']} pass{'es' if d['passes'] != 1 else ''}" if a.ocr and d.get("passes")
+                       else a.ocr.name if a.ocr else (a.ocr_error or "—")),
         }
         for key, lab in self.status.items():
             lab.configure(text=theme.fit(values[key], 34))

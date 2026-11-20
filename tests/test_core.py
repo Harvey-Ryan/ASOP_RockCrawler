@@ -125,6 +125,42 @@ def test_corrections():
     assert core.format_hits(core.match_signature(19200, sigs)) == "5× Aslarite · 6× Savrilium"
 
 
+def _hud():
+    return Image.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hud_17200.png")).convert("RGB")
+
+
+def test_auto_focus_finds_the_number():
+    hud = _hud()                     # a real Star Citizen HUD capture: "26°  5.0km" above "📍 17,200"
+    for box in [(160, 58, 232, 78), (138, 55, 238, 80), (100, 5, 280, 95), (0, 0, hud.width, hud.height)]:
+        rows = core.find_text(hud.crop(box), channel="max", level=0.4)
+        assert rows, box
+        x0, y0, x1, y1 = rows[0]["bbox"]
+        # the chosen line is the signature row (y ≈ 58-77 in the full capture), not the distance line
+        assert 55 <= box[1] + (y0 + y1) / 2 <= 80, (box, rows[0]["bbox"])
+        assert 40 + 24 <= rows[0]["image"].height <= 40 * 3 + 24   # ~40 px digits (the pin icon is taller)
+    # a remembered spot wins over "most characters"
+    rows = core.find_text(hud.crop((100, 5, 280, 95)), channel="max", level=0.4, prefer=(0.5, 0.15))
+    assert rows[0]["center"][1] < 0.35
+
+
+def test_read_number_passes():
+    hud = _hud().crop((138, 55, 238, 80))
+    known = lambda v: bool(core.match_signature(v, LIVE))
+    V = [["max", 0.4], ["lum", 0.35], ["lum", 0.55]]
+    rows = core.find_text(hud, channel="max", level=0.4)
+    calls = []
+    def ocr_ok(img):
+        calls.append(1)
+        return "9 17 200"            # first pass already a known signature (4× Raw Ice)
+    r = core.read_number(hud, rows, ocr_ok, known, V, [0, 1, 2])
+    assert (r["value"], r["winner"], r["passes"], len(calls)) == (17200, 0, 1, 1)
+    answers = iter(["17 260", "17 200", "17 200"])   # first pass misreads: fall back, credit pass 2
+    r = core.read_number(hud, rows, lambda img: next(answers), known, V, [0, 1, 2])
+    assert (r["value"], r["winner"], r["passes"]) == (17200, 1, 2)
+    r = core.read_number(hud, rows, lambda img: "5555", known, V, [0, 1, 2])   # clear but unknown
+    assert (r["value"], r["winner"]) == (5555, None)
+
+
 def test_hotkey():
     assert core.parse_hotkey("ctrl+shift+f8") == (0x6, 0x77)
     assert core.parse_hotkey("alt+k") == (0x1, ord("K"))
@@ -136,7 +172,7 @@ def test_color_and_preprocess():
     c = core.hud_color(img)
     assert c[2] > c[0] and c[2] > 150, c        # picks up the cyan text, not the dark bg
     bw = core.preprocess(img)
-    assert bw.mode == "L" and bw.width > 160 * 2
+    assert bw.mode == "L" and 40 + 24 <= bw.height <= 40 * 2 + 24   # cropped to the number, ~40 px characters
     assert core.preprocess(Image.new("RGB", (160, 40), (30, 30, 30))) is None
     assert core.apply_brightness((100, 100, 100), 2.0) == (255, 255, 255)
     assert core.apply_brightness((100, 200, 50), 0.5) == (50, 100, 25)
