@@ -97,16 +97,3 @@ python tests\test_core.py                 # the pure logic (parsing, matching, c
 | `ui_theme.py` | ASOP styling (Event Manager look), bundled fonts |
 | `updater.py` | Velopack self-updates from this repo's Releases |
 | `scripts/build.ps1` | PyInstaller build + self-test (`-Pack` also makes a local Setup.exe; needs `vpk`) |
-
-## Releasing
-**From GitHub:** Actions tab → **Build and release** → **Run workflow** → type the version
-(like `1.0.1`, higher than the last one) → **Run workflow**. Or from a terminal:
-```bash
-git tag v1.0.1 && git push origin v1.0.1
-```
-Either way, GitHub Actions (`.github/workflows/release.yml`) builds on Windows, runs the
-tests, launches the built exe once in self-test mode (checks OCR, Velopack, fonts and Tk
-made it in), packs it with Velopack, tags `main` if it was started from the button, and
-publishes a Release with `RockCrawler-Setup.exe` and the update packages. Installed copies
-pick it up within a few hours. Pushes and pull requests run the same build and self-test
-without publishing.
