@@ -33,7 +33,8 @@ Everything is in one window:
 - **Across the top:** what it's reading right now (the gold row), and whether the game is active.
 - **Left:** status (game, signature list, hotkeys), **Edit layout** and **Hide overlay**, and
   **Mining at**: a dropdown to pick where you're mining.
-  - **Edit layout**: drag the **READ** box tightly over the signature number and the
+  - **Edit layout**: drag the **READ** box over the signature number (it doesn't need to be
+    tight: RockCrawler finds the number inside the box, even as the HUD sways) and the
     **DISPLAY** box to where the result should appear (drag the edges to resize), then click
     **Done editing**. The window stays on top of the game while you edit.
 - **Right, three tabs:**
@@ -67,6 +68,12 @@ Hotkeys are optional. Change them on the Game & hotkeys tab; the status panel wa
 
 The wording is in `config.json` under `"labels"` and `"no_match_text"`.
 
+## Light on resources
+It only reads while Star Citizen is in front, and only runs OCR when the number's pixels
+change. It finds the number inside the READ box and scales it to a steady size, then reads it
+with whichever clean-up has worked best on your HUD. Usually that's one OCR pass; the others
+only run when that pass isn't a known signature.
+
 ## How it blends in
 - **Match HUD colour** (default): the text takes its colour from the HUD it is reading, so it
   follows each ship's HUD. Use Brightness to sit it above or below the HUD.
@@ -85,7 +92,8 @@ In `%APPDATA%\ASOP-RockCrawler`:
 - `error.log`: anything that went wrong.
 
 ## Troubleshooting
-- **Reads nothing:** make the READ box tight around the digits only. The Reading tab shows exactly what the OCR sees.
+- **Reads nothing:** check the READ box covers the number. Avoid putting other numbers on
+  the same line inside it. The Reading tab shows exactly what the OCR sees.
 - **"No Windows OCR language":** Windows Settings → Time & language → Language → add English (US).
 - **Hotkey taken:** another app owns it. Pick another on the Game & hotkeys tab.
 

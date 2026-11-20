@@ -306,48 +306,12 @@ def _remove_thin_lines(mask: list[bool], w: int, h: int) -> None:
                         mask[yy * w + cx] = False
 
 
-def _clean_mask(mask: list[bool], w: int, h: int, remove_lines: bool) -> tuple[list[bool], int, float]:
-    """Drop lines, specks and short bits. Returns (mask, digit height, stroke width)."""
-    if remove_lines:
-        _remove_thin_lines(mask, w, h)
-    groups = _components(mask, w, h)
-    if not groups:
-        return mask, 0, 0.0
-    info = []
-    for grp in groups:
-        ys = [j // w for j in grp]
-        info.append((grp, max(ys) - min(ys) + 1))
-    big = [hh for grp, hh in info if len(grp) >= 4]
-    tallest = max(big) if big else 0
-    min_area = max(4, (w * h) // 400)
-    area = perim = 0
-    for grp, hh in info:
-        if len(grp) < min_area or hh < tallest * 0.45:
-            for j in grp:
-                mask[j] = False
-            continue
-        area += len(grp)
-        for j in grp:  # edge pixels: a set pixel with an unset 4-neighbour
-            x, y = j % w, j // w
-            if x == 0 or y == 0 or x == w - 1 or y == h - 1 or not (mask[j - 1] and mask[j + 1] and mask[j - w] and mask[j + w]):
-                perim += 1
-    stroke = (2 * area / perim) if perim else 0.0
-    return mask, tallest, stroke
+TARGET_DIGIT_PX = 40  # Windows OCR reads most reliably with characters about this tall
 
 
-def preprocess(img: Image.Image, upscale: int = 3, invert: bool = False, threshold: int = 0,
-               remove_lines: bool = True, min_contrast: int = 40, channel: str = "max",
-               level: float = 0.0) -> Image.Image | None:
-    """HUD crop -> clean black digits on white, enlarged, ready for OCR. None if the box looks empty.
-
-    - channel: max = brightest channel (any HUD colour), min = only near-white digit cores
-      (drops coloured glow, chromatic fringing and icons), lum = plain brightness.
-    - threshold 0 = auto (Otsu, raised by `level` toward white: bloom makes HUD digits
-      fat, which closes the holes in 6/8/9/0 so OCR reads letters). Otherwise a fixed
-      1-254 on the contrast-stretched image.
-    - Removes thin horizontal lines, specks and anything much shorter than the digits.
-    - The final cut is made on the enlarged image so curves and holes survive.
-    """
+def _binarize(img: Image.Image, invert: bool, threshold: int, min_contrast: int, channel: str,
+              level: float):
+    """Contrast-stretched gray, its pixels and the cut value; None if the crop looks empty."""
     gray = to_gray(img, channel)
     if invert:
         gray = ImageOps.invert(gray)
@@ -355,9 +319,6 @@ def preprocess(img: Image.Image, upscale: int = 3, invert: bool = False, thresho
     if hi - lo < min_contrast:
         return None
     gray = ImageOps.autocontrast(gray, cutoff=1)
-    w, h = gray.size
-    px = list(gray.getdata())
-
     if threshold > 0:
         t = int(threshold)
     else:
@@ -365,21 +326,175 @@ def preprocess(img: Image.Image, upscale: int = 3, invert: bool = False, thresho
         # white to keep only the digit cores, not their bloom (0 = plain Otsu).
         t0 = _otsu(gray.histogram())
         t = int(t0 + (255 - t0) * level)
-    mask, _, _ = _clean_mask([p > t for p in px], w, h, remove_lines)
+    return gray, list(gray.getdata()), t
 
-    if not any(mask):
-        return None
+
+def _text_rows(mask: list[bool], w: int, h: int, remove_lines: bool) -> list[dict]:
+    """Group the shapes in a cleaned mask into lines of text.
+
+    Drops thin lines, specks and outline-like shapes (big, mostly hollow: frames, pills),
+    groups what's left into rows that overlap vertically, splits a row where there's a gap
+    wider than ~1.5 characters (so "26°   5.0km" and a number beside it come apart), and
+    within each row drops bits much shorter than its characters (commas, dots, fringes).
+    Each row: {"bbox": (x0, y0, x1, y1), "height": char height, "pixels": [...], "count": n}.
+    """
+    if remove_lines:
+        _remove_thin_lines(mask, w, h)
+    min_area = max(4, (w * h) // 2000)
+    comps = []
+    for grp in _components(mask, w, h):
+        if len(grp) < min_area:
+            continue
+        xs = [j % w for j in grp]
+        ys = [j // w for j in grp]
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        bw, bh = x1 - x0 + 1, y1 - y0 + 1
+        fill = len(grp) / (bw * bh)
+        if fill < 0.15 and max(bw, bh) > 0.3 * max(w, h):  # hollow frame / outline
+            continue
+        if bw > 4 * bh and bw > 0.3 * w:  # long bar
+            continue
+        comps.append({"px": grp, "x0": x0, "x1": x1, "y0": y0, "y1": y1, "h": bh})
+
+    rows: list[list[dict]] = []
+    for c in sorted(comps, key=lambda c: (c["y0"] + c["y1"]) / 2):
+        for row in rows:
+            ry0 = min(k["y0"] for k in row)
+            ry1 = max(k["y1"] for k in row)
+            overlap = min(ry1, c["y1"]) - max(ry0, c["y0"]) + 1
+            if overlap >= 0.5 * min(c["h"], ry1 - ry0 + 1):
+                row.append(c)
+                break
+        else:
+            rows.append([c])
+
+    out = []
+    for row in rows:
+        tall = max(k["h"] for k in row)
+        row = sorted((k for k in row if k["h"] >= tall * 0.45), key=lambda k: k["x0"])
+        # split on wide horizontal gaps
+        pieces, cur = [], [row[0]]
+        for k in row[1:]:
+            if k["x0"] - max(c["x1"] for c in cur) > 1.5 * tall:
+                pieces.append(cur)
+                cur = [k]
+            else:
+                cur.append(k)
+        pieces.append(cur)
+        for piece in pieces:
+            x0, x1 = min(k["x0"] for k in piece), max(k["x1"] for k in piece)
+            y0, y1 = min(k["y0"] for k in piece), max(k["y1"] for k in piece)
+            if len(piece) < 2 and (x1 - x0 + 1) < 1.5 * (y1 - y0 + 1):
+                continue  # a lone glyph, not a number
+            heights = sorted(k["h"] for k in piece)
+            out.append({"bbox": (x0, y0, x1, y1), "height": heights[len(heights) // 2],
+                        "pixels": [j for k in piece for j in k["px"]], "count": len(piece)})
+    return out
+
+
+def _render_row(gray: Image.Image, w: int, h: int, t: int, row: dict, target: int) -> Image.Image:
+    """Crop tight around one row, scale it so its characters are `target` px tall, and cut
+    black-on-white on the enlarged image (so curves and the holes in 6/8/9/0 survive)."""
+    x0, y0, x1, y1 = row["bbox"]
+    pad = max(2, int(row["height"] * 0.3))
+    box = (max(0, x0 - pad), max(0, y0 - pad), min(w, x1 + 1 + pad), min(h, y1 + 1 + pad))
     keep = Image.new("L", (w, h))
-    keep.putdata([255 if m else 0 for m in mask])
-    if upscale > 1:
-        size = (w * upscale, h * upscale)
-        big = gray.resize(size, Image.LANCZOS).point(lambda p: 255 if p > t else 0)
-        # Only keep what survived the clean-up, allowing a little slack around it.
-        keep = keep.resize(size, Image.NEAREST).filter(ImageFilter.MaxFilter(upscale + (1 - upscale % 2)))
-        text = ImageChops.multiply(big, keep)
-    else:
-        text = keep
+    keep.putdata([0] * (w * h))
+    kp = keep.load()
+    for j in row["pixels"]:
+        kp[j % w, j // w] = 255
+    keep, crop = keep.crop(box), gray.crop(box)
+    scale = max(1.0, min(8.0, target / max(1, row["height"])))
+    size = (max(1, round(crop.width * scale)), max(1, round(crop.height * scale)))
+    big = crop.resize(size, Image.LANCZOS).point(lambda p: 255 if p > t else 0)
+    grow = max(3, int(scale) | 1)  # odd MaxFilter size: a little slack around kept shapes
+    keep = keep.resize(size, Image.NEAREST).filter(ImageFilter.MaxFilter(grow))
+    text = ImageChops.multiply(big, keep)
     return ImageOps.expand(ImageOps.invert(text), border=12, fill=255)
+
+
+def find_text(img: Image.Image, invert: bool = False, threshold: int = 0, remove_lines: bool = True,
+              min_contrast: int = 40, channel: str = "max", level: float = 0.0,
+              prefer: tuple[float, float] | None = None, max_rows: int = 3,
+              target: int = TARGET_DIGIT_PX) -> list[dict]:
+    """Auto-focus: find the lines of text in a HUD crop and return each ready for OCR,
+    most likely the signature first. `prefer` is where (as a 0-1 fraction of the box) the
+    number was found last time; without it, the line with the most characters wins.
+    Each item: {"image": Image, "bbox": (x0, y0, x1, y1), "center": (fx, fy), "height": px}."""
+    b = _binarize(img, invert, threshold, min_contrast, channel, level)
+    if b is None:
+        return []
+    gray, px, t = b
+    w, h = gray.size
+    rows = _text_rows([p > t for p in px], w, h, remove_lines)
+    for r in rows:
+        x0, y0, x1, y1 = r["bbox"]
+        r["center"] = ((x0 + x1) / 2 / w, (y0 + y1) / 2 / h)
+    if prefer:
+        rows.sort(key=lambda r: (r["center"][0] - prefer[0]) ** 2 + (r["center"][1] - prefer[1]) ** 2)
+    else:
+        rows.sort(key=lambda r: (-r["count"], -(r["bbox"][2] - r["bbox"][0])))
+    return [{"image": _render_row(gray, w, h, t, r, target), "bbox": r["bbox"], "center": r["center"],
+             "height": r["height"]} for r in rows[:max_rows]]
+
+
+def read_number(raw: Image.Image, rows: list[dict], ocr, is_known, variants: list, order: list[int],
+                opts: dict | None = None, min_value: int = 1, max_value: int = 10_000_000,
+                target: int = TARGET_DIGIT_PX) -> dict:
+    """OCR as little as possible: the likeliest line (`rows`, from find_text with the
+    preferred variant `variants[order[0]]`) gets one pass; the other cleanups only run on
+    that line if the first pass isn't a known signature. A second line is tried the same
+    way. Returns {"value", "text", "image", "winner" (variant index or None), "center",
+    "passes"}. With nothing known it falls back to pick_value over the first line's
+    passes (an agreed clean number becomes "???")."""
+    opts = opts or {}
+    kw = dict(min_value=min_value, max_value=max_value)
+    first = None
+    passes = 0
+    for r in rows[:2]:
+        t = ocr(r["image"])
+        passes += 1
+        texts, who = [t], [order[0]]
+        if is_known is not None:
+            v = pick_value([t], is_known, **kw)
+            if v is not None:
+                return {"value": v, "text": t, "image": r["image"], "winner": order[0], "center": r["center"],
+                        "passes": passes}
+        x0, y0, x1, y1 = r["bbox"]
+        pad = int(r["height"] * 0.6) + 2
+        sub = raw.crop((max(0, x0 - pad), max(0, y0 - pad), min(raw.width, x1 + 1 + pad), min(raw.height, y1 + 1 + pad)))
+        for vi in order[1:]:
+            ch, lv = variants[vi]
+            rr = find_text(sub, channel=ch, level=float(lv), max_rows=1, target=target, **opts)
+            if not rr:
+                continue
+            tx = ocr(rr[0]["image"])
+            passes += 1
+            texts.append(tx)
+            who.append(vi)
+            if is_known is not None:
+                v = pick_value(texts, is_known, **kw)
+                if v is not None and is_known(v):  # only a known signature counts as a hit here
+                    winner = next((w for tt, w in zip(texts, who) if pick_value([tt], is_known, **kw) == v), vi)
+                    return {"value": v, "text": " | ".join(x.strip() for x in texts), "image": r["image"],
+                            "winner": winner, "center": r["center"], "passes": passes}
+        if first is None:
+            first = (r, texts)
+    if first is None:
+        return {"value": None, "text": "", "image": None, "winner": None, "center": None, "passes": passes}
+    r, texts = first
+    return {"value": pick_value(texts, is_known, **kw), "text": " | ".join(x.strip() for x in texts),
+            "image": r["image"], "winner": None, "center": None, "passes": passes}
+
+
+def preprocess(img: Image.Image, upscale: int = 3, invert: bool = False, threshold: int = 0,
+               remove_lines: bool = True, min_contrast: int = 40, channel: str = "max",
+               level: float = 0.0) -> Image.Image | None:
+    """HUD crop -> the most likely line of text, black on white and scaled for OCR
+    (None if nothing text-like). `upscale` is kept for older callers; the scale now
+    follows the character height (see find_text)."""
+    rows = find_text(img, invert, threshold, remove_lines, min_contrast, channel, level, max_rows=1)
+    return rows[0]["image"] if rows else None
 
 
 def hud_color(img: Image.Image, min_sat: float = 0.3) -> tuple[int, int, int] | None:
