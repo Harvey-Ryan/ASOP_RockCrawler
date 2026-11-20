@@ -1,5 +1,7 @@
 # ASOP RockCrawler
 
+![ASOP RockCrawler: the scanner number on the Star Citizen HUD with "4× Raw Ice" shown under it, beside the RockCrawler window](docs/rockcrawler.png)
+
 A small overlay for Star Citizen. It reads the mining signature number off your HUD and
 shows what it is right next to it, for example `2× Laranite`, `Hand Minable` or
 `ROC · 2× Wreckage`. It uses ASOP's own signature list (the same data and rules as the
