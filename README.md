@@ -12,7 +12,9 @@ game's memory or files.
 ## Install
 1. Download **RockCrawler-Setup.exe** from the
    [latest release](https://github.com/Harvey-Ryan/ASOP_RockCrawler/releases/latest) and run it.
-   It installs for your user only (no admin prompt), adds Start menu and desktop shortcuts, and starts RockCrawler.
+   It installs for your user only (no admin prompt), adds a Start menu shortcut and starts RockCrawler.
+   On first launch it asks whether you'd like a desktop shortcut too (change it any time under
+   Game & hotkeys → App).
    - Windows may say "Windows protected your PC" because the installer isn't code-signed yet:
      click **More info → Run anyway**.
 2. In Star Citizen, set **Display mode → Borderless**, because overlays can't draw over exclusive fullscreen.
@@ -27,13 +29,19 @@ brings your settings and box positions over, then removes the old install and it
 Uninstall from Windows **Settings → Apps**. Your settings stay in `%APPDATA%\ASOP-RockCrawler`.
 
 ## Using it
-The **main window** stays open while RockCrawler runs: what it's reading, where you're
-mining, signature count, hotkeys, version, and the controls.
-- **Edit layout**: drag the **READ** box tightly over the signature number and the
-  **DISPLAY** box to where the result should appear (drag the edges to resize), then click **Done editing**.
-- **Settings**: font, size, brightness, opacity, colour, reading sensitivity, where you're
-  mining, game window and hotkeys, with a live preview of what's being read.
-- **Hide overlay** / **Quit**. Closing the main window quits too.
+Everything is in one window:
+- **Across the top:** what it's reading right now (the gold row), and whether the game is active.
+- **Left:** status (game, where you're mining, signature list, hotkeys), **Edit layout** and **Hide overlay**.
+  - **Edit layout**: drag the **READ** box tightly over the signature number and the
+    **DISPLAY** box to where the result should appear (drag the edges to resize), then click
+    **Done editing**. The window stays on top of the game while you edit.
+- **Right, three tabs:**
+  - **Reading:** a live preview of what the OCR sees, plus tuning.
+  - **Look:** font, size, brightness, opacity, colour.
+  - **Game & hotkeys:** where you're mining, the game window, hotkeys, desktop shortcut,
+    updating the signature list.
+- **Bottom:** *Start minimized*, the version (click it to check for updates), and **Quit**.
+  Closing the window quits too.
 
 | Default key | What it does |
 |---|---|
@@ -41,7 +49,7 @@ mining, signature count, hotkeys, version, and the controls.
 | Ctrl+Shift+F9 | Hide/show the overlay |
 | Ctrl+Shift+F10 | Quit (it also quits by itself about 10 s after Star Citizen closes) |
 
-Hotkeys are optional. Change them under Settings → Game & hotkeys; the main window warns you if another app already uses one.
+Hotkeys are optional. Change them on the Game & hotkeys tab; the status panel warns you if another app already uses one.
 
 ## What it shows
 - **Ship rocks:** `2× Laranite`. A count above the most that rock ever clusters in isn't a
@@ -53,7 +61,7 @@ Hotkeys are optional. Change them under Settings → Game & hotkeys; the main wi
 - **A reading that fits several kinds shows them all, in short form:** `Hand · 3× Wreckage`
   (6,000), `ROC · 2× Wreckage` (4,000), `Hand · ROC · 6× Wreckage` (12,000).
 - **`???`**: a clear number that isn't any known rock or wreck. Blank means it couldn't read the number.
-- **Where you're mining** (Settings → Game & hotkeys) drops rocks that don't spawn there and
+- **Where you're mining** (Game & hotkeys tab) drops rocks that don't spawn there and
   lists the likeliest first. Wreckage can turn up anywhere, so it always stays.
 - Members' approved corrections from the ASOP site are applied, as the website does by default.
 
@@ -77,9 +85,9 @@ In `%APPDATA%\ASOP-RockCrawler`:
 - `error.log`: anything that went wrong.
 
 ## Troubleshooting
-- **Reads nothing:** make the READ box tight around the digits only. Settings → Reading shows exactly what the OCR sees.
+- **Reads nothing:** make the READ box tight around the digits only. The Reading tab shows exactly what the OCR sees.
 - **"No Windows OCR language":** Windows Settings → Time & language → Language → add English (US).
-- **Hotkey taken:** another app owns it. Pick another under Settings → Game & hotkeys.
+- **Hotkey taken:** another app owns it. Pick another on the Game & hotkeys tab.
 
 ---
 

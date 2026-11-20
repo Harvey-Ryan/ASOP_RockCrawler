@@ -26,7 +26,8 @@ if ($p.ExitCode -ne 0 -or -not (Test-Path $out)) { throw "Self-test failed (exit
 
 if ($Pack) {
     vpk pack --packId ASOP.RockCrawler --packVersion $Version --packDir dist\RockCrawler `
-        --mainExe RockCrawler.exe --packTitle "ASOP RockCrawler" --packAuthors "ASOP" --icon assets\asop.ico
+        --mainExe RockCrawler.exe --packTitle "ASOP RockCrawler" --packAuthors "ASOP" --icon assets\asop.ico `
+        --shortcuts StartMenuRoot
     if ($LASTEXITCODE) { throw "vpk pack failed" }
     Write-Host "Setup: $(Resolve-Path Releases)\ASOP.RockCrawler-win-Setup.exe"
 }

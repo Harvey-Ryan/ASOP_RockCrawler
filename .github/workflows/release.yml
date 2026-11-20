@@ -98,7 +98,8 @@ jobs:
           if ($LASTEXITCODE) { Write-Host "No earlier release to build a delta from." }
 
           vpk pack --packId $env:APP_ID --packVersion $v --packDir dist\RockCrawler `
-            --mainExe RockCrawler.exe --packTitle "ASOP RockCrawler" --packAuthors "ASOP" --icon assets\asop.ico
+            --mainExe RockCrawler.exe --packTitle "ASOP RockCrawler" --packAuthors "ASOP" --icon assets\asop.ico `
+            --shortcuts StartMenuRoot
           if ($LASTEXITCODE) { throw "vpk pack failed" }
 
           # Run-workflow releases: tag main now that the build and package are good
