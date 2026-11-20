@@ -1017,6 +1017,33 @@ FONTS = ["Barlow SemiBold", "Barlow Condensed SemiBold", "IBM Plex Mono Medium",
          "Segoe UI", "Consolas", "Arial Narrow", "Electrolize", "Orbitron", "Rajdhani SemiBold"]
 
 
+class PlacePicker(ttk.Combobox):
+    """Where you're mining: rocks that don't spawn there drop out of the matches
+    (wreckage is found anywhere). The list is rebuilt each time it opens, because the
+    signature list may arrive after the window does."""
+    ANY = "Anywhere"
+
+    def __init__(self, parent, app: App, **kw):
+        self.app = app
+        self.var = tk.StringVar()
+        self.names: dict[str, str] = {}
+        super().__init__(parent, textvariable=self.var, state="readonly", height=20, postcommand=self.load, **kw)
+        self.load()
+        self.var.set(next((k for k, v in self.names.items() if v == app.cfg["place"]), app.cfg["place"] or self.ANY))
+        self.bind("<<ComboboxSelected>>", self.chose)
+
+    def load(self):
+        self.names = {f"{p}  ({sysname})" if sysname else p: p for p, sysname in core.places_of(self.app.table)}
+        self.configure(values=[self.ANY] + list(self.names))
+
+    def chose(self, _e=None):
+        a = self.app
+        a.cfg["place"] = self.names.get(self.var.get(), "")
+        a.value, a.last_hash = None, None  # re-match with the new place
+        a.save_config()
+        self.selection_clear()
+
+
 class MainWindow:
     """The one window (the Tk root), layout C: status and the main actions on the left,
     settings tabs on the right, the current reading in the gold row across the top.
@@ -1068,6 +1095,8 @@ class MainWindow:
                 self.hk_labels = [ttk.Label(lab, text="—", width=24, anchor="w") for _ in range(3)]
                 for hl in self.hk_labels:
                     hl.pack(anchor="w")
+            elif name == "Mining at":  # pick the place right here
+                lab = PlacePicker(kv, app, width=19)
             else:
                 lab = ttk.Label(kv, text="—", width=24, anchor="w")
             lab.grid(row=i, column=1, sticky="w", pady=3)
@@ -1102,7 +1131,6 @@ class MainWindow:
         self.rows["Game"].configure(text=f"●  {game}", foreground=col)
         self.reading.configure(text=theme.fit(f"{a.value:,}  →  {a.text or 'no match'}", 34) if a.value else "—")
         self.rows["Signatures"].configure(text=theme.fit(f"{len(a.signatures)}  ({a.table_status})", 24))
-        self.rows["Mining at"].configure(text=theme.fit(a.cfg["place"] or "Anywhere", 24))
         for lab, (hid, key) in zip(self.hk_labels, a.HOTKEY_KEYS.items()):
             spec, ok, msg = a.hk_status.get(hid, (a.cfg[key], None, "starting…"))
             what = {"hotkey_edit": "edit", "hotkey_toggle": "hide", "hotkey_quit": "quit"}[key]
@@ -1275,30 +1303,6 @@ class SettingsPanel(ttk.Frame):
         check("invert", "HUD text is darker than its background")
 
         tab("Game & hotkeys")
-        section("Where you're mining")
-        note("Rocks that don't spawn there drop out. Wreckage is found anywhere.")
-        ANY = "Anywhere"
-        place_names: dict[str, str] = {}
-
-        def load_places():
-            # Rebuilt each time the list opens: the signature list may arrive after the window does.
-            place_names.clear()
-            place_names.update({f"{p}  ({sysname})" if sysname else p: p for p, sysname in core.places_of(app.table)})
-            pc.configure(values=[ANY] + list(place_names))
-
-        pv = tk.StringVar(value=cfg["place"] or ANY)
-        pc = ttk.Combobox(f, textvariable=pv, state="readonly", height=20, postcommand=lambda: load_places())
-        load_places()
-        pv.set(next((k for k, v in place_names.items() if v == cfg["place"]), cfg["place"] or ANY))
-
-        def chose_place(_):
-            cfg["place"] = place_names.get(pv.get(), "")
-            app.value, app.last_hash = None, None  # re-match with the new place
-            app.save_config()
-
-        pc.bind("<<ComboboxSelected>>", chose_place)
-        labeled("Place", pc)
-
         section("Game window")
         # (A window-title match is still possible with "target_title" in config.json.)
         proc = tk.StringVar(value=cfg["target_process"])

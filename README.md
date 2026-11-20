@@ -31,15 +31,15 @@ Uninstall from Windows **Settings → Apps**. Your settings stay in `%APPDATA%\A
 ## Using it
 Everything is in one window:
 - **Across the top:** what it's reading right now (the gold row), and whether the game is active.
-- **Left:** status (game, where you're mining, signature list, hotkeys), **Edit layout** and **Hide overlay**.
+- **Left:** status (game, signature list, hotkeys), **Edit layout** and **Hide overlay**, and
+  **Mining at**: a dropdown to pick where you're mining.
   - **Edit layout**: drag the **READ** box tightly over the signature number and the
     **DISPLAY** box to where the result should appear (drag the edges to resize), then click
     **Done editing**. The window stays on top of the game while you edit.
 - **Right, three tabs:**
   - **Reading:** a live preview of what the OCR sees, plus tuning.
   - **Look:** font, size, brightness, opacity, colour.
-  - **Game & hotkeys:** where you're mining, the game window, hotkeys, desktop shortcut,
-    updating the signature list.
+  - **Game & hotkeys:** the game window, hotkeys, desktop shortcut, updating the signature list.
 - **Bottom:** *Start minimized*, the version (click it to check for updates), and **Quit**.
   Closing the window quits too.
 
@@ -61,7 +61,7 @@ Hotkeys are optional. Change them on the Game & hotkeys tab; the status panel wa
 - **A reading that fits several kinds shows them all, in short form:** `Hand · 3× Wreckage`
   (6,000), `ROC · 2× Wreckage` (4,000), `Hand · ROC · 6× Wreckage` (12,000).
 - **`???`**: a clear number that isn't any known rock or wreck. Blank means it couldn't read the number.
-- **Where you're mining** (Game & hotkeys tab) drops rocks that don't spawn there and
+- **Where you're mining** (the *Mining at* dropdown) drops rocks that don't spawn there and
   lists the likeliest first. Wreckage can turn up anywhere, so it always stays.
 - Members' approved corrections from the ASOP site are applied, as the website does by default.
 
