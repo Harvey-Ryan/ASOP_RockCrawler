@@ -286,6 +286,47 @@ def migrate_old_install() -> None:
     threading.Thread(target=tidy, daemon=True).start()
 
 
+def desktop_dir() -> Path:
+    """The real Desktop folder (follows OneDrive / redirected desktops)."""
+    buf = ctypes.create_unicode_buffer(260)
+    if ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, buf) == 0:  # CSIDL_DESKTOPDIRECTORY
+        return Path(buf.value)
+    return Path.home() / "Desktop"
+
+
+def desktop_shortcut() -> Path:
+    return desktop_dir() / f"{APP_NAME}.lnk"  # same name Setup.exe uses for its shortcuts
+
+
+def has_desktop_shortcut() -> bool:
+    try:
+        return desktop_shortcut().exists()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def set_desktop_shortcut(on: bool) -> bool:
+    """Add or remove the desktop shortcut; returns whether one exists afterwards.
+    Only for installed copies: it points at this exe, which updates keep in place."""
+    if not FROZEN:
+        return has_desktop_shortcut()
+    lnk = desktop_shortcut()
+    try:
+        if not on:
+            lnk.unlink(missing_ok=True)
+        else:
+            exe = Path(sys.executable)
+            q = lambda p: str(p).replace("'", "''")  # noqa: E731 - PowerShell single-quote escaping
+            script = (f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{q(lnk)}'); "
+                      f"$s.TargetPath = '{q(exe)}'; $s.WorkingDirectory = '{q(exe.parent)}'; "
+                      f"$s.IconLocation = '{q(exe)},0'; $s.Description = '{APP_NAME}'; $s.Save()")
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                           creationflags=0x08000000, timeout=30)  # CREATE_NO_WINDOW
+    except Exception:  # noqa: BLE001
+        _log_error("desktop shortcut")
+    return has_desktop_shortcut()
+
+
 class HotkeyThread(threading.Thread):
     """Global hotkeys via RegisterHotKey; works while the game has focus. No extra packages."""
 
@@ -503,7 +544,6 @@ class App:
         self.active = False
         self.target_hwnd = None
         self.last_client = None
-        self.settings: SettingsWindow | None = None
         self.hk_status: dict[int, tuple] = {}
 
         self.text = ""  # what the display shows
@@ -542,7 +582,9 @@ class App:
         self.root.after(60, self._tick_focus)
         self.root.after(120, self._tick_scan)
         if first_run:
-            self.root.after(400, lambda: (self.enter_edit(), self.open_settings()))
+            self.root.after(400, self.enter_edit)
+        if FROZEN and not self.cfg.get("asked_desktop_shortcut"):
+            self.root.after(900, self._ask_desktop_shortcut)
         elif self.cfg["start_minimized"]:
             self.root.iconify()
 
@@ -557,13 +599,37 @@ class App:
         self.hotkeys = HotkeyThread({hid: self.cfg[key] for hid, key in self.HOTKEY_KEYS.items()}, self.q)
         self.hotkeys.start()
 
-    def open_settings(self):
-        if self.settings and self.settings.winfo_exists():
-            self.settings.deiconify()
-            self.settings.lift()
-            self.settings.focus_force()
-        else:
-            self.settings = SettingsWindow(self)
+    def _ask_desktop_shortcut(self):
+        """Setup.exe only adds a Start menu shortcut; ask once whether to add one on the desktop."""
+        self.cfg["asked_desktop_shortcut"] = True
+        self.save_config()
+        if has_desktop_shortcut():  # older installs already have one
+            return
+        d = tk.Toplevel(self.root)
+        d.title(APP_NAME)
+        d.resizable(False, False)
+        d.transient(self.root)
+        theme.hazard_stripe(d).pack(fill="x")
+        f = ttk.Frame(d, padding=(20, 16, 20, 16))
+        f.pack(fill="both")
+        ttk.Label(f, text="Add a RockCrawler shortcut to your desktop?").pack(anchor="w")
+        ttk.Label(f, text="You can change this any time under Game & hotkeys → App.", style="Dim.TLabel").pack(anchor="w", pady=(4, 14))
+        bf = ttk.Frame(f)
+        bf.pack(fill="x")
+
+        def answer(yes):
+            if yes:
+                self.main.settings.shortcut_var.set(set_desktop_shortcut(True))
+            d.destroy()
+
+        ttk.Button(bf, text="Add shortcut", style="Accent.TButton", command=lambda: answer(True)).pack(side="left")
+        ttk.Button(bf, text="No thanks", command=lambda: answer(False)).pack(side="left", padx=8)
+        d.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - d.winfo_reqwidth()) // 2
+        y = self.root.winfo_rooty() + 120
+        d.geometry(f"+{x}+{y}")
+        theme.style_window(d, hwnd_of(d), self.icon)
+        d.grab_set()
 
     def toggle_edit(self):
         self.exit_edit() if self.editing else self.enter_edit()
@@ -665,8 +731,6 @@ class App:
 
     def own_hwnds(self) -> set:
         hs = {self.read_box.hwnd, self.disp_box.hwnd, self.main.hwnd}
-        if self.settings and self.settings.winfo_exists():
-            hs.add(self.settings.hwnd)
         return {h for h in hs if h}
 
     def _tick_focus(self):
@@ -869,6 +933,10 @@ class App:
         self.capture_boxes()  # normalise to the current game size so dragging is 1:1
         for b in (self.read_box, self.disp_box):
             b.apply_style()
+        # Keep the window over the game while you line things up, on the tab with the preview.
+        self.root.deiconify()
+        self.root.attributes("-topmost", True)
+        self.main.settings.pills.select("Reading")
         self.redraw()
 
     def exit_edit(self):
@@ -881,6 +949,7 @@ class App:
             b.apply_style()
             b.canvas.configure(cursor="")
         self.read_box.hide()
+        self.root.attributes("-topmost", False)
         self.last_hash = None
         self.redraw()
 
@@ -949,7 +1018,8 @@ FONTS = ["Barlow SemiBold", "Barlow Condensed SemiBold", "IBM Plex Mono Medium",
 
 
 class MainWindow:
-    """The app's always-available window (the Tk root): status plus the main controls.
+    """The one window (the Tk root), layout C: status and the main actions on the left,
+    settings tabs on the right, the current reading in the gold row across the top.
     Closing it quits the app; minimise it to keep it out of the way."""
 
     def __init__(self, app: App):
@@ -957,53 +1027,63 @@ class MainWindow:
         r = app.root
         r.resizable(False, False)
         _, slot = theme.header(r, "RockCrawler")
-        self.game = tk.Label(slot, text="●  —", bg=theme.CARD, fg=theme.DIM, font=theme.PILL, width=22, anchor="e")
+        self.game = tk.Label(slot, text="●  —", bg=theme.CARD, fg=theme.DIM, font=theme.PILL, width=24, anchor="e")
         self.game.pack(side="right")
 
         # Gold highlight row: the current reading (like a selected Event Manager row)
         gold = tk.Frame(r, bg=theme.ACC, padx=18, pady=10)
         gold.pack(fill="x")
         ttk.Label(gold, text="READING", style="GoldKey.TLabel", width=11).pack(side="left")
-        self.reading = ttk.Label(gold, text="—", style="GoldValue.TLabel", width=24, anchor="w")
+        self.reading = ttk.Label(gold, text="—", style="GoldValue.TLabel", width=34, anchor="w")
         self.reading.pack(side="left")
 
-        theme.band(r, "Status").pack(fill="x")
-        body = ttk.Frame(r, padding=(18, 10, 18, 4))
-        body.pack(fill="x")
+        # Footer first (packed to the bottom), so the body takes the space above it.
+        foot = tk.Frame(r, bg=theme.CARD, padx=16, pady=8)
+        foot.pack(fill="x", side="bottom")
+        tk.Frame(r, bg=theme.LINE, height=1).pack(fill="x", side="bottom")  # border above the footer
+        sm = tk.BooleanVar(value=app.cfg["start_minimized"])
+        tk.Checkbutton(foot, text="Start minimized", variable=sm, bg=theme.CARD, fg=theme.FG, selectcolor=theme.BG,
+                       activebackground=theme.CARD, activeforeground=theme.HI, font=theme.BODY, bd=0, highlightthickness=0,
+                       command=lambda: (app.cfg.__setitem__("start_minimized", sm.get()), app.save_config())).pack(side="left")
+        ttk.Button(foot, text="Quit", command=app.quit, width=10).pack(side="right")
+        # Version and updates: click the version to check now.
+        self.version = tk.Label(foot, text="—", bg=theme.CARD, fg=theme.DIM, font=theme.BODY, width=30, anchor="e",
+                                cursor="hand2")
+        self.version.pack(side="right", padx=(0, 14))
+        self.version.bind("<Button-1>", lambda _e: app.updater.check(force=True))
+        self.update_btn = ttk.Button(foot, text="Restart to update", style="Accent.TButton", command=app.restart_to_update)
+
+        body = tk.Frame(r, bg=theme.BG)
+        body.pack(fill="both", expand=True)
+        left = ttk.Frame(body, padding=(18, 14, 18, 14))
+        left.pack(side="left", fill="y")
+        theme.band(left, "Status").pack(fill="x", pady=(0, 8))
+        kv = ttk.Frame(left)
+        kv.pack(anchor="w", padx=4)
         self.rows = {}
-        for i, name in enumerate(("Mining at", "Signatures", "Hotkeys")):
-            ttk.Label(body, text=name.upper(), style="Key.TLabel", width=11).grid(row=i, column=0, sticky="nw", pady=4)
+        for i, name in enumerate(("Game", "Mining at", "Signatures", "Hotkeys")):
+            ttk.Label(kv, text=name.upper(), style="Key.TLabel", width=11).grid(row=i, column=0, sticky="nw", pady=3)
             if name == "Hotkeys":  # one line per hotkey, so only a failing one turns red
-                lab = ttk.Frame(body)
-                self.hk_labels = [ttk.Label(lab, text="—", width=40, anchor="w") for _ in range(3)]
+                lab = ttk.Frame(kv)
+                self.hk_labels = [ttk.Label(lab, text="—", width=24, anchor="w") for _ in range(3)]
                 for hl in self.hk_labels:
                     hl.pack(anchor="w")
             else:
-                lab = ttk.Label(body, text="—", width=40, anchor="w")
-            lab.grid(row=i, column=1, sticky="w", pady=4)
+                lab = ttk.Label(kv, text="—", width=24, anchor="w")
+            lab.grid(row=i, column=1, sticky="w", pady=3)
             self.rows[name] = lab
+        ttk.Frame(left, height=12).pack()
+        self.edit_btn = ttk.Button(left, command=app.toggle_edit, style="Accent.TButton")
+        self.edit_btn.pack(fill="x", pady=(0, 6))
+        self.hide_btn = ttk.Button(left, command=app.toggle_hidden)
+        self.hide_btn.pack(fill="x")
+        tk.Frame(body, bg=theme.LINE, width=1).pack(side="left", fill="y")
+        self.settings = SettingsPanel(body, app)
+        self.settings.pack(side="left", fill="both", expand=True)
 
-        bf = ttk.Frame(r, padding=(18, 10, 18, 4))
-        bf.pack(fill="x")
-        self.edit_btn = ttk.Button(bf, command=app.toggle_edit, width=13, style="Accent.TButton")
-        self.edit_btn.pack(side="left")
-        ttk.Button(bf, text="Settings", command=app.open_settings).pack(side="left", padx=6)
-        self.hide_btn = ttk.Button(bf, command=app.toggle_hidden, width=13)
-        self.hide_btn.pack(side="left")
-        ttk.Button(bf, text="Quit", command=app.quit).pack(side="right")
-        sm = tk.BooleanVar(value=app.cfg["start_minimized"])
-        foot = ttk.Frame(r, padding=(18, 6, 18, 14))
-        foot.pack(fill="x")
-        ttk.Checkbutton(foot, text="Start minimized", variable=sm,
-                        command=lambda: (app.cfg.__setitem__("start_minimized", sm.get()), app.save_config())).pack(side="left")
-        # Version and updates: click the version to check now.
-        self.update_btn = ttk.Button(foot, text="Restart to update", style="Accent.TButton", command=app.restart_to_update)
-        self.version = ttk.Label(foot, text="—", style="Dim.TLabel", width=34, anchor="e", cursor="hand2")
-        self.version.pack(side="right")
-        self.version.bind("<Button-1>", lambda _e: app.updater.check(force=True))
         r.update_idletasks()
         sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
-        r.geometry(f"+{(sw - r.winfo_reqwidth()) // 2}+{(sh - r.winfo_reqheight()) // 3}")
+        r.geometry(f"+{(sw - r.winfo_reqwidth()) // 2}+{max(20, (sh - r.winfo_reqheight()) // 3)}")
         self.hwnd = hwnd_of(r)
         theme.style_window(r, self.hwnd)
         r.after(200, self._refresh)
@@ -1013,57 +1093,58 @@ class MainWindow:
         if a.closing:
             return
         if not a.target_hwnd and (a.cfg["target_process"].strip() or a.cfg["target_title"].strip()):
-            game, col = "Game not seen yet", theme.DIM
+            game, col = "Not seen yet", theme.DIM
         elif a.active:
             game, col = ("Active", theme.GOOD) if not a.user_hidden else ("Overlay hidden", theme.ACC)
         else:
-            game, col = "Game in background", theme.DIM
+            game, col = "In background", theme.DIM
         self.game.configure(text=f"●  {game.upper()}", fg=col)
-        self.reading.configure(text=theme.fit(f"{a.value:,}  →  {a.text or 'no match'}", 24) if a.value else "—")
-        self.rows["Signatures"].configure(text=theme.fit(f"{len(a.signatures)}  ({a.table_status})", 40))
-        self.rows["Mining at"].configure(text=theme.fit(a.cfg["place"] or "Anywhere", 40))
+        self.rows["Game"].configure(text=f"●  {game}", foreground=col)
+        self.reading.configure(text=theme.fit(f"{a.value:,}  →  {a.text or 'no match'}", 34) if a.value else "—")
+        self.rows["Signatures"].configure(text=theme.fit(f"{len(a.signatures)}  ({a.table_status})", 24))
+        self.rows["Mining at"].configure(text=theme.fit(a.cfg["place"] or "Anywhere", 24))
         for lab, (hid, key) in zip(self.hk_labels, a.HOTKEY_KEYS.items()):
             spec, ok, msg = a.hk_status.get(hid, (a.cfg[key], None, "starting…"))
             what = {"hotkey_edit": "edit", "hotkey_toggle": "hide", "hotkey_quit": "quit"}[key]
             if msg == "off" or not spec:
                 lab.configure(text=f"—  {what} (off)", style="Dim.TLabel")
                 continue
-            lab.configure(text=theme.fit(f"{spec.upper()}  {what}" + ("" if ok is not False else f"  ⚠ {msg}"), 40),
+            lab.configure(text=theme.fit(f"{spec.upper()}  {what}" + ("" if ok is not False else f"  ⚠ {msg}"), 24),
                           style="Bad.TLabel" if ok is False else "TLabel")
         self.edit_btn.configure(text="Done editing" if a.editing else "Edit layout")
         self.hide_btn.configure(text="Show overlay" if a.user_hidden else "Hide overlay")
         u = a.updater
         u.check()  # rate-limited inside: on start, then every few hours
-        self.version.configure(text=theme.fit(u.status(), 34))
+        self.version.configure(text=theme.fit(u.status(), 30))
         if u.state == "ready" and not self.update_btn.winfo_ismapped():
             self.update_btn.pack(side="right", padx=(0, 10), before=self.version)
         a.root.after(300, self._refresh)
 
 
-class SettingsWindow(tk.Toplevel):
-    def __init__(self, app: App):
-        super().__init__(app.root)
+class SettingsPanel(ttk.Frame):
+    """The settings, as tabs on the right of the main window (Reading / Look / Game & hotkeys)."""
+
+    def __init__(self, parent, app: App):
+        super().__init__(parent)
         self.app = app
         cfg = app.cfg
-        self.title(f"{APP_NAME} — Settings")
-        self.attributes("-topmost", True)
-        self.resizable(False, False)
-        self.protocol("WM_DELETE_WINDOW", self.close)
         pad = {"padx": 8, "pady": 3}
         names = ["Reading", "Look", "Game & hotkeys"]
-        _, slot = theme.header(self, "Settings")
-        body = ttk.Frame(self, padding=(16, 12, 16, 0))
+        # Tab bar: a #333 header row with gold pills, then the tabs stacked in one cell, so
+        # the window keeps the size of the largest tab and never jumps when you switch.
+        bar = tk.Frame(self, bg=theme.BAND, padx=12, pady=6)
+        bar.pack(fill="x")
+        body = ttk.Frame(self, padding=(18, 12, 18, 12))
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=1)
         tabs = {}
-        for name in names:  # stacked in one cell: the window keeps the size of the largest tab
+        for name in names:
             tabs[name] = ttk.Frame(body)
             tabs[name].columnconfigure(1, weight=1)
             tabs[name].grid(row=0, column=0, sticky="nsew")
-        self.pills = theme.Pills(slot, names, lambda n: tabs[n].tkraise())
+        self.pills = theme.Pills(bar, names, lambda n: tabs[n].tkraise(), bg=theme.BAND)
         self.pills.pack(side="left")
-        outer = self
         f, row, cur, rows = None, 0, None, {}
 
         def tab(name):
@@ -1074,12 +1155,12 @@ class SettingsWindow(tk.Toplevel):
 
         def section(text):
             nonlocal row
-            theme.band(f, text).grid(row=row, column=0, columnspan=3, sticky="we", pady=(14 if row else 0, 8))
+            theme.band(f, text).grid(row=row, column=0, columnspan=3, sticky="we", pady=(12 if row else 0, 6))
             row += 1
 
         def note(text, column=0, span=3):
             nonlocal row
-            ttk.Label(f, text=text, style="Dim.TLabel", wraplength=400, justify="left").grid(
+            ttk.Label(f, text=text, style="Dim.TLabel", wraplength=380 if column == 0 else 280, justify="left").grid(
                 row=row, column=column, columnspan=span, sticky="w", padx=8, pady=(0, 4))
             row += 1
 
@@ -1122,10 +1203,10 @@ class SettingsWindow(tk.Toplevel):
         # live preview of what's being read
         tab("Reading")
         section("Reading now")
-        fr, self.crop_preview = theme.framed(f)
+        fr, self.crop_preview = theme.framed(f, 380, 62)
         fr.grid(row=row, column=0, columnspan=3, sticky="w", **pad)
         row += 1
-        fr, self.preview = theme.framed(f)
+        fr, self.preview = theme.framed(f, 380, 62)
         fr.grid(row=row, column=0, columnspan=3, sticky="w", **pad)
         row += 1
         # One value per line, fixed width, "—" until there's something to show,
@@ -1134,13 +1215,12 @@ class SettingsWindow(tk.Toplevel):
         sf.grid(row=row, column=0, columnspan=3, sticky="w", **pad)
         row += 1
         self.status = {}
-        for i, key in enumerate(("OCR text", "Value", "Shows", "Engine", "Signatures", "Game")):
+        for i, key in enumerate(("OCR text", "Value", "Shows", "Engine")):
             ttk.Label(sf, text=key.upper(), style="Key.TLabel", width=12).grid(row=i, column=0, sticky="w", pady=1)
             v = ttk.Label(sf, text="—", style="Mono.TLabel", width=34, anchor="w")
             v.grid(row=i, column=1, sticky="w", pady=1)
             self.status[key] = v
-        note("Click Edit layout, then drag the READ box over the signature number and the "
-             "DISPLAY box where the rock name should appear. Drag edges to resize.")
+        note("Edit layout: drag READ over the number, DISPLAY where the answer goes.")
 
         tab("Look")
         section("Text")
@@ -1163,7 +1243,7 @@ class SettingsWindow(tk.Toplevel):
             app.redraw()
 
         def pick():
-            c = colorchooser.askcolor(cfg["custom_color"], parent=self)[1]
+            c = colorchooser.askcolor(cfg["custom_color"], parent=app.root)[1]
             if c:
                 cfg["custom_color"] = c
                 self.swatch.configure(bg=c)
@@ -1190,18 +1270,26 @@ class SettingsWindow(tk.Toplevel):
         scale("hold_ms", 500, 10000, "Linger", "{:.0f} ms", lambda v: int(round(v / 100) * 100))
         scale("switch_reads", 2, 6, "Steadiness", "{:.0f} reads", lambda v: int(round(v)))
         scale("threshold", 0, 254, "Sensitivity", "{:.0f}", lambda v: int(round(v)))
-        note("Sensitivity 0 = auto. Raise it if digits blur together, lower it if they break up.")
+        note("Sensitivity 0 = auto. Raise it if digits blur, lower it if they break up.")
         check("remove_lines", "Remove HUD lines and specks")
         check("invert", "HUD text is darker than its background")
 
         tab("Game & hotkeys")
         section("Where you're mining")
-        note("Rocks that don't spawn there drop out of the matches; wreckage can turn up anywhere.")
+        note("Rocks that don't spawn there drop out. Wreckage is found anywhere.")
         ANY = "Anywhere"
-        place_names = {f"{p}  ({sysname})" if sysname else p: p for p, sysname in core.places_of(app.table)}
-        current = next((k for k, v in place_names.items() if v == cfg["place"]), ANY)
-        pv = tk.StringVar(value=current)
-        pc = ttk.Combobox(f, textvariable=pv, values=[ANY] + list(place_names), state="readonly", height=20)
+        place_names: dict[str, str] = {}
+
+        def load_places():
+            # Rebuilt each time the list opens: the signature list may arrive after the window does.
+            place_names.clear()
+            place_names.update({f"{p}  ({sysname})" if sysname else p: p for p, sysname in core.places_of(app.table)})
+            pc.configure(values=[ANY] + list(place_names))
+
+        pv = tk.StringVar(value=cfg["place"] or ANY)
+        pc = ttk.Combobox(f, textvariable=pv, state="readonly", height=20, postcommand=lambda: load_places())
+        load_places()
+        pv.set(next((k for k, v in place_names.items() if v == cfg["place"]), cfg["place"] or ANY))
 
         def chose_place(_):
             cfg["place"] = place_names.get(pv.get(), "")
@@ -1212,35 +1300,29 @@ class SettingsWindow(tk.Toplevel):
         labeled("Place", pc)
 
         section("Game window")
-        note("The overlay only shows while this window is in front.")
+        # (A window-title match is still possible with "target_title" in config.json.)
         proc = tk.StringVar(value=cfg["target_process"])
-        title = tk.StringVar(value=cfg["target_title"])
-        pe, te = ttk.Entry(f, textvariable=proc), ttk.Entry(f, textvariable=title)
+        pe = ttk.Entry(f, textvariable=proc)
         proc.trace_add("write", lambda *_: cfg.__setitem__("target_process", proc.get()))
-        title.trace_add("write", lambda *_: cfg.__setitem__("target_title", title.get()))
         labeled("Process", pe)
-        labeled("Title contains", te)
         wins = ttk.Combobox(f, state="readonly", postcommand=lambda: wins.configure(
             values=[f"{e} — {t[:60]}" for e, t in list_windows()]))
 
         def chose(_):
-            e, _, t = wins.get().partition(" — ")
-            proc.set(e)
-            title.set("")
+            proc.set(wins.get().partition(" — ")[0])
 
         wins.bind("<<ComboboxSelected>>", chose)
         labeled("Pick a window", wins)
-        note("Blank both to always show.", column=1, span=2)
+        note("The overlay shows only while this game is in front. Blank = always show.", column=1, span=2)
 
         section("Hotkeys")
-        note("Optional shortcuts. Blank one to turn it off.")
         hk_vars = {}
         for hid, key, label in ((App.HK_EDIT, "hotkey_edit", "Edit layout"), (App.HK_TOGGLE, "hotkey_toggle", "Hide/show"),
                                 (App.HK_QUIT, "hotkey_quit", "Quit")):
             v = tk.StringVar(value=cfg[key])
             hk_vars[key] = v
             labeled(label, ttk.Entry(f, textvariable=v))
-        self.hk_msg = ttk.Label(f, style="Dim.TLabel", wraplength=300, justify="left")
+        self.hk_msg = ttk.Label(f, text="Optional. Blank one to turn it off.", style="Dim.TLabel", wraplength=300, justify="left")
         self.hk_msg.grid(row=row, column=0, columnspan=2, sticky="w", padx=8)
 
         def apply_hotkeys():
@@ -1259,29 +1341,24 @@ class SettingsWindow(tk.Toplevel):
 
         ttk.Button(f, text="Apply", command=apply_hotkeys).grid(row=row, column=2, sticky="e", padx=8)
         row += 1
+
+        section("App")
+        self.shortcut_var = tk.BooleanVar(value=has_desktop_shortcut())
+        sc = ttk.Checkbutton(f, text="Desktop shortcut", variable=self.shortcut_var,
+                             command=lambda: self.shortcut_var.set(set_desktop_shortcut(self.shortcut_var.get())))
+        sc.grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        if not FROZEN:
+            sc.state(["disabled"])  # running from source: nothing installed to point a shortcut at
+        ttk.Button(f, text="Update signatures", command=app.refresh_table).grid(row=row, column=2, sticky="e", padx=8)
+        row += 1
         ttk.Checkbutton(f, text="Quit when Star Citizen closes", variable=(ew := tk.BooleanVar(value=cfg["exit_with_game"])),
-                        command=lambda: cfg.__setitem__("exit_with_game", ew.get())).grid(row=row, column=0, columnspan=3, sticky="w", **pad)
+                        command=lambda: (cfg.__setitem__("exit_with_game", ew.get()), app.save_config())
+                        ).grid(row=row, column=0, columnspan=3, sticky="w", **pad)
         row += 1
 
-        bf = ttk.Frame(self, padding=(16, 12, 16, 14))
-        bf.pack(fill="x")
-        self.edit_btn = ttk.Button(bf, command=app.toggle_edit, width=14, style="Accent.TButton")
-        self.edit_btn.pack(side="left")
-        ttk.Button(bf, text="Update signatures", command=app.refresh_table).pack(side="left", padx=6)
-        ttk.Button(bf, text="Close", command=self.close).pack(side="right")
-
-        self.update_idletasks()
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry(f"+{sw - self.winfo_reqwidth() - 40}+{max(20, (sh - self.winfo_reqheight()) // 3)}")
         self.pills.select("Reading")
-        self.hwnd = hwnd_of(self)
-        theme.style_window(self, self.hwnd, app.icon)
         self._photo = self._crop_photo = None
         self.after(100, self._refresh)
-
-    def close(self):
-        self.app.save_config()
-        self.destroy()
 
     def _refresh(self):
         if not self.winfo_exists():
@@ -1290,33 +1367,27 @@ class SettingsWindow(tk.Toplevel):
         crop = d.get("crop")
         if crop is not None:
             crop = crop.copy()
-            k = max(1, min(4, 376 // max(1, crop.width), 86 // max(1, crop.height)))
+            k = max(1, min(4, 376 // max(1, crop.width), 58 // max(1, crop.height)))
             crop = crop.resize((crop.width * k, crop.height * k), Image.NEAREST)
-            crop.thumbnail((376, 86))
+            crop.thumbnail((376, 58))
             self._crop_photo = ImageTk.PhotoImage(crop)
             self.crop_preview.configure(image=self._crop_photo)
         img = d.get("img")
         if img is not None:
             img = img.copy()
-            img.thumbnail((376, 86))
+            img.thumbnail((376, 58))
             self._photo = ImageTk.PhotoImage(img)
             self.preview.configure(image=self._photo, text="")
         else:
             self.preview.configure(image="", text="box looks empty")
-        t = a.table
-        build = f", build {t.get('build')}" if t.get("build") else ""
-        extra = f" +{len(a.extras)} extra" if a.extras else ""
         values = {
             "OCR text": d["raw"] or "—",
             "Value": f"{d['value']:,}" if d.get("value") is not None else "—",
             "Shows": a.text or "—",
             "Engine": a.ocr.name if a.ocr else (a.ocr_error or "—"),
-            "Signatures": f"{len(a.signatures)} ({a.table_status}{build}){extra}",
-            "Game": "in front" if a.active else "not in front",
         }
         for key, lab in self.status.items():
             lab.configure(text=theme.fit(values[key], 34))
-        self.edit_btn.configure(text="Done editing" if a.editing else "Edit layout")
         self.after(250, self._refresh)
 
 
