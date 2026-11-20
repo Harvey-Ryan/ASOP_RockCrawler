@@ -525,14 +525,15 @@ def fetch_signatures(url: str, timeout: float = 15, corrections_url: str | None 
 
 
 def places_of(table: dict) -> list[tuple[str, str | None]]:
-    """(place, system) pairs where any rock in the table spawns, A-Z by system then place."""
+    """(place, system) pairs where any rock in the table spawns, A-Z by place name
+    (ignoring capitalization)."""
     seen: dict[str, str | None] = {}
     for p in table.get("spots", []):
         seen.setdefault(p["place"], p.get("system"))
     for s in table.get("signatures", []):
         for pl in s.get("places") or []:
             seen.setdefault(pl, None)
-    return sorted(seen.items(), key=lambda kv: ((kv[1] or "~"), kv[0]))
+    return sorted(seen.items(), key=lambda kv: (kv[0].casefold(), kv[0]))
 
 
 def chance_index(table: dict) -> dict:
