@@ -102,7 +102,10 @@ def test_place_filter():
     assert core.format_hits(core.match_signature(5000, two)) == "1× A rock / B rock"
     table = {"spots": [{"place": "Ita", "system": "Stanton", "rock": "Raw Ice", "method": "ship", "chance": 0.3}],
              "signatures": [{"places": ["Daymar", "Ita"]}]}
-    assert core.places_of(table) == [("Ita", "Stanton"), ("Daymar", None)]
+    assert core.places_of(table) == [("Daymar", None), ("Ita", "Stanton")]
+    mixed = {"spots": [{"place": p, "system": "X", "rock": "r", "method": "ship", "chance": 0}
+                       for p in ("aberdeen", "Yela", "ArcCorp Mining Area 045", "bloom", "Arial")]}
+    assert [p for p, _ in core.places_of(mixed)] == ["aberdeen", "ArcCorp Mining Area 045", "Arial", "bloom", "Yela"]
 
 
 def test_unknown_number():
